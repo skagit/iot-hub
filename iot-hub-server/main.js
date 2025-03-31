@@ -40,7 +40,7 @@ fastify.post('/device/register', async function (request, reply) {
     fastify.log.info(`Device registered with IP: ${deviceState.ip_address}`)
 
     // Respond with success
-    reply.send({ status: 'success', message: 'Device registered successfully' })
+    reply.status(200).send({ status: 'success', message: 'Device registered successfully' })
   } catch (error) {
     fastify.log.error(error)
     reply.status(500).send({ status: 'error', message: 'Internal Server Error' })

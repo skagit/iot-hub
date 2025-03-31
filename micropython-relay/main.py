@@ -201,12 +201,15 @@ def register_device(hub_ip, hub_port, path, payload_dict):
         print("--- END HUB RESPONSE ---")
 
         # Check response status
-        if b"HTTP/1.0 2" in response_bytes.split(b'\r\n', 1)[0]:
-             print("Registration successful (Hub responded with 2xx).")
-             success = True
+        response_str = response_bytes.decode('utf-8', 'ignore')
+        status_line = response_str.split('\r\n', 1)[0]
+    
+        if " 200 " in status_line or " 201 " in status_line or " 202 " in status_line:
+            print("Registration successful (Hub responded with 2xx).")
+            success = True
         else:
-             print("Registration might have failed (Hub response not 2xx).")
-             success = False
+            print(f"Registration might have failed. Status line: '{status_line}'")
+            success = False
 
     except OSError as e:
         print(f"Registration failed: Socket Error - {e}") # Will show ENOMEM here if it happens
