@@ -1,7 +1,7 @@
 import Fastify from 'fastify'
 import Static from '@fastify/static'
 import path from 'node:path'
-import { addDevice } from './service.js'
+import { addDevice, upsertDevice } from './service.js'
 
 const fastify = Fastify({
   logger: true
@@ -34,13 +34,26 @@ fastify.post('/device/register', async function (request, reply) {
     }
     
     // Call the service to add the device
-    addDevice(deviceState)
+    upsertDevice(deviceState)
 
     // Log the registration details with IP address
     fastify.log.info(`Device registered with IP: ${deviceState.ip_address}`)
 
     // Respond with success
     reply.status(200).send({ status: 'success', message: 'Device registered successfully' })
+  } catch (error) {
+    fastify.log.error(error)
+    reply.status(500).send({ status: 'error', message: 'Internal Server Error' })
+  }
+})
+
+fastify.get('/devices', async function (request, reply) {
+  try {
+    // Retrieve the list of devices
+    const devices = await getDevices()
+
+    // Respond with the list of devices
+    reply.status(200).send(devices)
   } catch (error) {
     fastify.log.error(error)
     reply.status(500).send({ status: 'error', message: 'Internal Server Error' })
