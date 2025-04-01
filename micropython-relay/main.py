@@ -446,6 +446,9 @@ def start_server():
                 if str(e) == "115" or str(e) == "[Errno 11]":  # EAGAIN or EWOULDBLOCK
                     # No connection available, continue loop to check for pending registrations
                     continue
+                elif str(e) == "110" or "[Errno 110]" in str(e):  # ETIMEDOUT
+                    # Socket timeout is expected, silently continue the loop
+                    continue
                 else:
                     # Other socket error
                     print(f"Socket Error: {e}")

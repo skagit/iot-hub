@@ -1,7 +1,11 @@
 import Fastify from 'fastify'
 import Static from '@fastify/static'
 import path from 'node:path'
-import { addDevice, upsertDevice } from './service.js'
+import { getDevices, upsertDevice } from './service.js'
+import { env } from 'node:process';
+
+// Set timezone (before creating the Fastify instance)
+env.TZ = 'America/Los_Angeles'; // Seattle is in Pacific Time Zone
 
 const fastify = Fastify({
   logger: true
@@ -59,6 +63,23 @@ fastify.get('/devices', async function (request, reply) {
     reply.status(500).send({ status: 'error', message: 'Internal Server Error' })
   }
 })
+
+fastify.get('/time', async function (request, reply) {
+  try {
+    const now = new Date();
+    const response = {
+      iso: now.toISOString(),
+      local: now.toString(),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      timestamp: now.getTime(),
+      offset: now.getTimezoneOffset()
+    };
+    reply.status(200).send(response);
+  } catch (error) {
+    fastify.log.error(error);
+    reply.status(500).send({ status: 'error', message: 'Internal Server Error' });
+  }
+});
 
 // Start the server
 fastify.listen({ port: 80, host: '0.0.0.0' }, function (err, address) {
