@@ -39,11 +39,13 @@ HUB_PORT = 80 # Default HTTP port for the hub
 HUB_REGISTER_PATH = "/device/register" # API endpoint path on the hub
 REGISTRATION_TIMEOUT_S = 10 # Seconds to wait for registration connection/response
 REGISTRATION_PERIOD_MS = 1000 * 60 * 5 # How often to check if re-registration is needed (e.g., 300000ms = 5 minutes)
+WIFI_RECONNECT_MAX_ATTEMPTS = 3 # Maximum number of reconnection attempts before giving up
 
 # --- Global State ---
 ip_address = 'Not Connected' # Placeholder for Pico's IP address
 is_registered = False # Flag to track registration status with the hub
 pending_registration_check = False # Flag set by timer, checked in main loop
+pending_wifi_check = False # Flag to check WiFi connectivity
 timer = machine.Timer() # Hardware timer for periodic tasks
 
 # --- Hardware Setup ---
@@ -94,6 +96,59 @@ def connect_wifi():
         wlan.disconnect() # Ensure disconnected state
         return False
 
+def check_wifi_connection():
+    """Checks if WiFi is connected and attempts to reconnect if not."""
+    global ip_address
+    
+    if wlan.isconnected():
+        # WiFi is connected, update IP address in case it changed
+        current_ip = wlan.ifconfig()[0]
+        if ip_address != current_ip:
+            print(f"IP address changed from {ip_address} to {current_ip}")
+            ip_address = current_ip
+        return True
+    
+    print("WiFi connection lost, attempting to reconnect...")
+    # WiFi is not connected, try to reconnect
+    attempts = 0
+    while attempts < WIFI_RECONNECT_MAX_ATTEMPTS and not wlan.isconnected():
+        attempts += 1
+        print(f"Reconnection attempt {attempts}/{WIFI_RECONNECT_MAX_ATTEMPTS}...")
+        
+        # Ensure we're disconnected before trying to connect again
+        try:
+            wlan.disconnect()
+            time.sleep(1)
+        except:
+            pass
+            
+        # Try to reconnect
+        try:
+            wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+            
+            # Wait for connection with timeout
+            wait_count = 0
+            while not wlan.isconnected() and wait_count < 10:  # 10 seconds timeout
+                print('.', end='')
+                time.sleep(1)
+                wait_count += 1
+                
+            if wlan.isconnected():
+                status = wlan.ifconfig()
+                ip_address = status[0]
+                print(f"\nReconnected to WiFi successfully!")
+                print(f"New IP Address: {ip_address}")
+                return True
+        except Exception as e:
+            print(f"Reconnection error: {e}")
+    
+    if not wlan.isconnected():
+        print("Failed to reconnect to WiFi after multiple attempts.")
+        ip_address = 'Connection Failed'
+        return False
+    
+    return wlan.isconnected()
+
 # --- Payload Generation Helper ---
 def get_device_payload():
     """Constructs the standardized payload dictionary for status and registration."""
@@ -101,6 +156,7 @@ def get_device_payload():
     global ip_address    # Access global IP
     global relay_pin     # Access relay pin object
     global wlan          # Access WLAN object
+    global HUB_IP_ADDRESS # Access hub IP address
 
     # Collect garbage before potentially large payload creation
     gc.collect()
@@ -126,6 +182,7 @@ def get_device_payload():
             "wifi_connected": wifi_connected_status,
             "wifi_ssid": WIFI_SSID if wifi_connected_status else None,
             "hub_registered": is_registered,
+            "hub_ip_address": HUB_IP_ADDRESS, # Added hub IP address
             "mem_free": gc.mem_free() # Add free memory info for debugging
         }
         return payload
@@ -139,6 +196,7 @@ def get_device_payload():
             "ip_address": ip_address,
             "wifi_connected": wlan.isconnected(),
             "hub_registered": is_registered,
+            "hub_ip_address": HUB_IP_ADDRESS, # Added hub IP address
             "mem_free": gc.mem_free() # Add free memory info
         }
 
@@ -232,16 +290,19 @@ def register_device(hub_ip, hub_port, path, payload_dict):
 
 # --- Periodic Registration Check (Timer Callback) ---
 def periodic_registration_check(timer_instance):
-    """Called periodically by the timer. Sets a flag if registration is needed."""
+    """Called periodically by the timer. Sets flags for registration and WiFi checks."""
     global is_registered
-    global pending_registration_check # Flag to signal main loop
+    global pending_registration_check # Flag to signal main loop for registration
+    global pending_wifi_check # Flag to signal main loop for WiFi check
 
-    # This callback should be quick and avoid allocations.
+    # First, set flag for WiFi check regardless of registration status
+    print("\n--- Timer: Setting flag for WiFi connectivity check. ---")
+    pending_wifi_check = True
+    
+    # Set registration check flag if needed
     if not is_registered:
-        print("\n--- Timer: Detected need for registration check. Setting flag. ---")
+        print("--- Timer: Detected need for registration check. Setting flag. ---")
         pending_registration_check = True
-    # else: # Optional: Log that check is skipped
-    #    print("\n--- Timer: Device registered, check skipped. ---")
 
 
 # --- HTTP Response Helper ---
@@ -325,6 +386,7 @@ def handle_index():
     gc.collect() # Collect before getting memory info
     mem_free = gc.mem_free()
     reg_status_text = "Registered with Hub" if is_registered else "NOT Registered with Hub"
+    wifi_status_text = "Connected" if wlan.isconnected() else "Disconnected"
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>{DEVICE_NAME} - Pico W Relay Control</title></head>
@@ -332,22 +394,150 @@ def handle_index():
 <h1>{DEVICE_NAME} - Pico W Relay Control (Socket)</h1>
 <p>Server is running on IP: {ip_address}</p>
 <p>Relay connected to Pin: {RELAY_PIN_NUMBER}</p>
-<p>Status: {reg_status_text}</p>
+<p>WiFi Status: {wifi_status_text}</p>
+<p>Hub Status: {reg_status_text}</p>
+<p>Hub IP Address: {HUB_IP_ADDRESS}</p>
 <p>Free Memory: {mem_free} bytes</p>
 <h2>API Endpoints:</h2>
 <ul>
     <li><a href="/relay/on" target="_blank">/relay/on</a> (Turn Relay ON)</li>
     <li><a href="/relay/off" target="_blank">/relay/off</a> (Turn Relay OFF)</li>
     <li><a href="/status" target="_blank">/status</a> (Get Current Status)</li>
+    <li><a href="/register" target="_blank">/register</a> (Trigger Hub Registration)</li>
+    <li><a href="/wifi/check" target="_blank">/wifi/check</a> (Force WiFi Check)</li>
+    <li><code>POST /hub/set_ip</code> (Update Hub IP Address) - Requires JSON body: {{"hub_ip": "new.ip.address"}}</li>
 </ul>
 </body></html>"""
     return 200, 'text/html', html_content
+
+def handle_set_hub_ip(request_body):
+    """Updates the hub IP address based on JSON request body."""
+    global HUB_IP_ADDRESS
+    global is_registered
+    
+    try:
+        # Parse JSON request body
+        data = ujson.loads(request_body)
+        
+        # Check if the required field is present
+        if 'hub_ip' not in data:
+            return 400, 'application/json', ujson.dumps({
+                'status': 'error',
+                'message': 'Missing required field: hub_ip',
+                'device_name': DEVICE_NAME
+            })
+        
+        # Update the global HUB_IP_ADDRESS
+        new_hub_ip = data['hub_ip']
+        old_hub_ip = HUB_IP_ADDRESS
+        HUB_IP_ADDRESS = new_hub_ip
+        
+        # Reset registration status since we changed the hub
+        is_registered = False
+        
+        print(f"Hub IP updated from {old_hub_ip} to {new_hub_ip}")
+        
+        # Return success response
+        return 200, 'application/json', ujson.dumps({
+            'status': 'success',
+            'message': f'Hub IP updated to {new_hub_ip}',
+            'device_name': DEVICE_NAME,
+            'old_hub_ip': old_hub_ip,
+            'new_hub_ip': new_hub_ip
+        })
+    except ValueError:
+        return 400, 'application/json', ujson.dumps({
+            'status': 'error',
+            'message': 'Invalid JSON in request body',
+            'device_name': DEVICE_NAME
+        })
+    except Exception as e:
+        print(f"Error updating hub IP: {e}")
+        return 500, 'application/json', ujson.dumps({
+            'status': 'error',
+            'message': f'Error updating hub IP: {str(e)}',
+            'device_name': DEVICE_NAME
+        })
+
+def handle_trigger_registration():
+    """Manually triggers registration with the hub."""
+    try:
+        # Get current device payload
+        payload = get_device_payload()
+        
+        # Attempt registration
+        success = register_device(HUB_IP_ADDRESS, HUB_PORT, HUB_REGISTER_PATH, payload)
+        
+        if success:
+            return 200, 'application/json', ujson.dumps({
+                'status': 'success',
+                'message': f'Successfully registered with hub at {HUB_IP_ADDRESS}',
+                'device_name': DEVICE_NAME,
+                'hub_ip': HUB_IP_ADDRESS
+            })
+        else:
+            return 400, 'application/json', ujson.dumps({
+                'status': 'error',
+                'message': f'Failed to register with hub at {HUB_IP_ADDRESS}',
+                'device_name': DEVICE_NAME,
+                'hub_ip': HUB_IP_ADDRESS
+            })
+    except Exception as e:
+        print(f"Error triggering registration: {e}")
+        return 500, 'application/json', ujson.dumps({
+            'status': 'error',
+            'message': f'Error triggering registration: {str(e)}',
+            'device_name': DEVICE_NAME
+        })
+
+def handle_wifi_check():
+    """Manually triggers WiFi connectivity check."""
+    try:
+        was_connected = wlan.isconnected()
+        if was_connected:
+            status = "WiFi is currently connected"
+            print(f"{status} - IP: {ip_address}")
+        else:
+            status = "WiFi is currently disconnected, attempting to reconnect"
+            print(status)
+        
+        # Force a reconnection check
+        reconnected = check_wifi_connection()
+        
+        if reconnected:
+            if not was_connected:
+                message = f"Successfully reconnected to WiFi. New IP: {ip_address}"
+            else:
+                message = f"WiFi connection verified. IP: {ip_address}"
+            
+            return 200, 'application/json', ujson.dumps({
+                'status': 'success',
+                'message': message,
+                'device_name': DEVICE_NAME,
+                'ip_address': ip_address,
+                'was_connected': was_connected
+            })
+        else:
+            return 400, 'application/json', ujson.dumps({
+                'status': 'error',
+                'message': 'Failed to establish WiFi connection',
+                'device_name': DEVICE_NAME,
+                'was_connected': was_connected
+            })
+    except Exception as e:
+        print(f"Error checking WiFi: {e}")
+        return 500, 'application/json', ujson.dumps({
+            'status': 'error',
+            'message': f'Error checking WiFi: {str(e)}',
+            'device_name': DEVICE_NAME
+        })
 
 
 # --- Main Server Loop ---
 def start_server():
     """Sets up the socket server and handles incoming connections."""
     global pending_registration_check # Allow modification
+    global pending_wifi_check # Allow modification
 
     # Create a TCP/IP socket
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -365,9 +555,9 @@ def start_server():
 
     # --- Start Periodic Registration Timer ---
     try:
-        # Timer now only sets a flag, not calling register_device directly
+        # Timer now sets flags for both WiFi check and registration check
         timer.init(period=REGISTRATION_PERIOD_MS, mode=machine.Timer.PERIODIC, callback=periodic_registration_check)
-        print(f"Periodic registration check timer started (every {REGISTRATION_PERIOD_MS / 1000} seconds).")
+        print(f"Periodic check timer started (every {REGISTRATION_PERIOD_MS / 1000} seconds).")
     except Exception as e:
          print(f"Error starting periodic timer: {e}")
 
@@ -375,8 +565,26 @@ def start_server():
     while True:
         client_conn = None
         
-        # Check for pending registration BEFORE waiting for a connection
-        if pending_registration_check:
+        # Check for pending WiFi check FIRST
+        if pending_wifi_check:
+            print("Processing pending WiFi check (from main loop)...")
+            was_connected = wlan.isconnected()
+            wifi_reconnected = check_wifi_connection()
+            pending_wifi_check = False # Reset flag after attempt
+            
+            if not was_connected and wifi_reconnected:
+                print("WiFi was reconnected successfully!")
+                # Since we reconnected, we should also try to register
+                pending_registration_check = True
+            elif not wifi_reconnected:
+                print("WiFi is still disconnected after check.")
+                # Since WiFi is still down, don't try to register now
+                pending_registration_check = False
+            
+            gc.collect()
+        
+        # Check for pending registration AFTER WiFi check (only if WiFi is connected)
+        if pending_registration_check and wlan.isconnected():
             print("Processing pending registration check (from main loop)...")
             payload = get_device_payload()
             register_device(HUB_IP_ADDRESS, HUB_PORT, HUB_REGISTER_PATH, payload)
@@ -384,7 +592,7 @@ def start_server():
             gc.collect() # Clean up after registration attempt
         
         try:
-            # Make the socket non-blocking with a short timeout so registration checks can happen
+            # Make the socket non-blocking with a short timeout so we can check flags
             server_socket.settimeout(1.0)  # 1 second timeout
             
             try:
@@ -416,16 +624,36 @@ def start_server():
                     print(f"Parsed Request: {method} {path}")
 
                     # --- Routing ---
-                    if method == 'GET' or method == 'POST':
+                    if method == 'GET':
                         if path == '/relay/on':
                             status_code, content_type, body = handle_relay_on()
                         elif path == '/relay/off':
                             status_code, content_type, body = handle_relay_off()
-                        elif path == '/status' and method == 'GET':
-                             status_code, content_type, body = handle_get_status()
-                        elif path == '/' and method == 'GET':
-                             status_code, content_type, body = handle_index()
-                        # else: remains 404 Not Found
+                        elif path == '/status':
+                            status_code, content_type, body = handle_get_status()
+                        elif path == '/':
+                            status_code, content_type, body = handle_index()
+                        elif path == '/register':
+                            status_code, content_type, body = handle_trigger_registration()
+                        elif path == '/wifi/check':
+                            status_code, content_type, body = handle_wifi_check()
+                        else:
+                            status_code = 404
+                            body = 'Not Found'
+                    elif method == 'POST':
+                        if path == '/hub/set_ip':
+                            # Extract the request body for POST requests
+                            request_body = request_str.split('\r\n\r\n', 1)[1] if '\r\n\r\n' in request_str else ''
+                            status_code, content_type, body = handle_set_hub_ip(request_body)
+                        elif path == '/relay/on':
+                            status_code, content_type, body = handle_relay_on()
+                        elif path == '/relay/off':
+                            status_code, content_type, body = handle_relay_off()
+                        elif path == '/wifi/check':
+                            status_code, content_type, body = handle_wifi_check()
+                        else:
+                            status_code = 404
+                            body = 'Not Found'
                     else: # Method not allowed
                         status_code = 405
                         body = 'Method Not Allowed'
@@ -444,7 +672,7 @@ def start_server():
 
             except OSError as e:
                 if str(e) == "115" or str(e) == "[Errno 11]":  # EAGAIN or EWOULDBLOCK
-                    # No connection available, continue loop to check for pending registrations
+                    # No connection available, continue loop to check for pending tasks
                     continue
                 elif str(e) == "110" or "[Errno 110]" in str(e):  # ETIMEDOUT
                     # Socket timeout is expected, silently continue the loop
@@ -489,7 +717,7 @@ def start_server():
 
     # --- Cleanup ---
     timer.deinit()
-    print("Periodic registration timer stopped.")
+    print("Periodic timer stopped.")
     if server_socket:
         server_socket.close()
         print("Server socket closed.")

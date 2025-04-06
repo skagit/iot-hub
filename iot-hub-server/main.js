@@ -1,7 +1,7 @@
 import Fastify from 'fastify'
 import Static from '@fastify/static'
 import path from 'node:path'
-import { getDevices, upsertDevice } from './service.js'
+import { getDevices, refreshDevices, upsertDevice } from './service.js'
 import { env } from 'node:process';
 
 // Set timezone (before creating the Fastify instance)
@@ -54,7 +54,8 @@ fastify.post('/device/register', async function (request, reply) {
 fastify.get('/devices', async function (request, reply) {
   try {
     // Retrieve the list of devices
-    const devices = await getDevices()
+    await refreshDevices()
+    const devices = getDevices()
 
     // Respond with the list of devices
     reply.status(200).send(devices)
